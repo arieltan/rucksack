@@ -1,0 +1,1191 @@
+* Rucksack: a flexible, light weight, open source persistence library
+
+* Arthur Lemmens, alemmens@xs4all.nl, 2006-04-30
+* (talk given at the ECLM 2006 in Hamburg)
+
+1. Introduction
+2. Serialization
+3. Object table/cache
+4. Garbage collection
+5. Transactions
+6. Recovery
+7. Indexing
+8. Schemas
+9. Questions
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+1. Introduction
+
+* EXPERTISE
+
+Maybe I should start by saying that I don't consider myself an expert
+on any of the subjects that I'm going to talk about today (except
+maybe Lisp programming).  But I've been wanting a Lisp persistence
+library for years, and nobody else was writing it for me (or, if they
+were writing them, they lacked features that I considered essential).
+So I finally decided to ignore the fact that I didn't know anything
+about things like database implementation, transactions or garbage
+collectors and just do it.
+
+So here we are...
+
+
+* FEATURES
+ 
+Rucksack is a persistence library for Common Lisp.  It's a bit similar
+to systems like AllegroCache or PLOB, but it's also different in some
+important respects.  Here are some of its features:
+
+PICTURE
+ - Common Lisp only
+ - 99% portable 
+ - persistent conses, vectors, CLOS objects, ...
+ - object cache
+ - parallel transactions
+ - incremental garbage collector
+ - schema evolution
+ - use MOP to automatically deal with slot changes
+ - btree indexing for class instances and slot values
+ - flexible architecture
+ - not finished
+END
+
+ - it's all written in Common Lisp
+ - it's almost all portable, except for process locks and some MOP magic
+   (I write and test it with Lispworks)
+ - it tries to provide persistent equivalents of Lisp's classical
+   data structures, including persistent conses, persistent vectors
+   and persistent CLOS instances.
+ - it has an object based cache; changes to persistent objects are
+   written to disk (serialized) during a transaction-commit
+ - it supports parallel transactions
+ - it has an incremental garbage collector
+ - it support schema evolution, in the sense that it can deal with
+   changes to persistent class definitions in a way that's similar
+   to what CL provides with update-instance-for-redefined-class
+ - it uses the MOP to automatically deal with slot changes
+ - it provides  indexing for instances and slot values
+   Btrees are included, user defined indexes are also possible.
+ - I try hard to keep it flexible and readable, so it should be
+   relatively easy to adapt to your own needs.
+ - it's not finished yet 
+   I've written code for almost everything mentioned above, but there
+   are still quite a few loose ends and it needs some heavy testing.
+
+
+* THIS TALK
+
+PICTURE
+
+ - serialization
+   How do I get it on disk?
+ - object ids
+   How do I know where I put it?
+ - cache
+   Déjà vu.
+ - garbage collection
+   How do I get rid of this mess?
+ - parallel transactions
+   Have my cake and eat it too.
+ - failure recovery
+   What if somebody pulls the plug?
+ - automatic slot and class indexing
+   How do I find it back?
+ - schema evolution
+   What if my class definition changes?
+
+END
+
+I'm going to present Rucksack in about the same order as I developed
+it.  This means we'll start at the bottom, with things like
+serialization, object ids, cacheing and garbage collection.  Then
+we'll move on to headache stuff like parallel transactions, recovering
+from failure, using the MOP for automatic slot and class indexing, and
+schema evolution.
+
+* THE JUNGLE
+
+Writing a persistence library is like hacking your way through a
+jungle.  At each point there are difficult decisions to make, and
+making the best decision is almost impossible.  In fact, what's best
+will often depend on the application.
+
+Garbage collection is a nice example.  One week I thought I should
+write a mark-and-sweep collector, the next week I thought that a
+copying collector would be better.  Or maybe some kind of mixture?  I
+ended up writing half a copying collector, then changed my mind and
+wrote a mark and sweep collector.  Now I'm having doubts again.
+
+But this is nothing new for most Common Lisp programmers.  We're used
+to the fact that there is no single best programming paradigm, no
+single best answer.  Instead, Common Lisp provides a flexible
+programming framework that you can adapt to the problem at hand.  I
+try to do the same for Rucksack.
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+2. Objects on disk: serialization
+
+* INTRO
+
+The serializer is the low level layer that takes care of writing
+objects to disk and reading them back again.
+
+* SHARED OBJECTS
+
+One of the things that can complicate serialization is that the
+serializer must deal with shared objects in such a way that they can
+be reconstructed correctly by the 'deserializer'.  This can have quite
+a large effect on the memory usage of a serializer (there's a reason
+why Common Lisp has the *print-circle* flag).
+
+Fortunately, we don't need to worry about shared objects when we're
+serializing in Rucksack: Rucksack only respects the object identity of
+objects that are explicitly declared to be persistent objects.  (Erm,
+well, that's not entirely true: there are some corner cases like
+symbols and packages, but I'm not going to go into that now.)
+
+
+* WHY NOT WRITE AND READ
+
+If you know that you don't need to worry about shared objects,
+serializing objects to disk is easy.  In principle, you could just use
+Common Lisp's WRITE function to write the object to disk.  Then you
+can use READ to deserialize the object when you need it again.
+
+This is possible, but it would be slow.  Lisp's syntax for
+representing data was designed to be writable and readable by humans.
+The serializer doesn't have to worry about human readability, so it
+can make decisions that allow for smaller representations and much
+faster reading.  In my experience, the speed difference can easily be
+one or two orders of magnitude.
+
+Two examples:
+
+- 'Container objects' like vectors and lists are prefixed by the
+  number of elements they contain.  This means that the deserializer
+  can pre-allocate a container of exactly the right size.
+
+- The serializer prefixes every object by its type.  This is not
+  necessarily equivalent to a Common Lisp type, but gives enough
+  information to the deserializer so that it can prepare itself for
+  what's coming.
+
+
+* MARKERS
+
+CODE
+
+(defconstant +minus-one+                #x09)
+(defconstant +zero+                     #x0A)
+(defconstant +one+                      #x0B)
+(defconstant +two+                      #x0C
+
+(defconstant +object+                   #x70)
+(defconstant +unbound-slot+             #x71)
+(defconstant +shared-object-definition+ #x72)
+(defconstant +shared-object-reference+  #x73)
+
+(defconstant +hash-table+               #x80)
+(defconstant +pathname+                 #x90)
+(defconstant +array+                    #xA0)
+
+END
+
+The markers above are hard wired constants and I define them
+explicitly.  This may look a bit un-lispy; I've seen other
+serialization libraries where the marker numbers automatically roll
+out of some macro.  I don't do that.  I do it the old-fashioned way
+because I want a well defined file format for Rucksack; there should
+not be any implementation or platform dependencies in Rucksack's file
+format.
+
+
+
+CODE FRAGMENT: DESERIALIZE
+
+(defun deserialize (serializer &optional (eof-error-p t) (eof-value nil))
+  "Reads the next object from the serializer stream.  Signals an end-of-file
+error or returns EOF-VALUE when the end of the stream is reached."
+  (let ((marker (read-next-marker serializer)))
+    (if marker
+        (deserialize-contents marker serializer)
+      ;; End of file
+      (if eof-error-p
+          (error 'end-of-file :stream serializer)
+        eof-value))))
+
+END
+
+The top-level DESERIALIZE function just reads a marker and then calls
+the generic function DESERIALIZE-CONTENTS.  DESERIALIZE-CONTENTS has
+a different method for each marker.
+
+For example:
+
+
+* SERIALIZING A HASH TABLE
+
+(defmethod serialize ((hash-table hash-table) stream)
+  (serialize-marker +hash-table+ stream)
+  ;; Hash-table-test is guaranteed to return a symbol (for the
+  ;; standardized hash-table test functions), so that's nicely
+  ;; portable.
+  (serialize (hash-table-test hash-table) stream)
+  (serialize (hash-table-size hash-table) stream)
+  (serialize (hash-table-rehash-size hash-table) stream)
+  (serialize (hash-table-rehash-threshold hash-table) stream)
+  (serialize (hash-table-count hash-table) stream)
+  (maphash (lambda (key value)
+             (serialize key stream)
+             (serialize value stream))
+           hash-table))
+
+
+* DESERIALIZING IT AGAIN
+
+CODE 
+
+(defmethod deserialize-contents ((marker (eql +hash-table+)) stream)
+  (let* ((test (deserialize stream))
+         (size (deserialize stream))
+         (rehash-size (deserialize stream))
+         (rehash-threshold (deserialize stream))
+         (count (deserialize stream)))
+    (let ((table (make-hash-table :test test
+                                  :size size
+                                  :rehash-size rehash-size
+                                  :rehash-threshold rehash-threshold)))
+      (loop repeat count
+            do (let* ((key (deserialize stream))
+                      (value (deserialize stream)))
+                 (setf (gethash key table) value)))
+      table)))
+
+END
+
+
+
+* OBJECTS THAT CAN'T BE SERIALIZED
+
+Some Lisp objects can't be serialized portably: structs and function
+objects are the most obvious examples.  I think that not serializing
+those is a small price to pay for portability, but I suppose there are
+exceptions.
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+3. FINDING/UPDATING OBJECTS: OBJECT TABLE, CACHE
+
+* INTRO
+
+That was easy.
+
+So now we're able to save normal Lisp objects to disk.  And we can
+even load them back later.  This means we're doing fine for settings
+where we can dump the entire world from time to time, and load it back
+when we need it.
+
+For many applications, this is all that's needed.  And a good
+serializer can be orders of magnitude faster than using WRITE/READ or
+writing MAKE-LOAD-FORM methods, so we're already ahead of the game.
+
+* SERIALIZING PERSISTENT OBJECTS
+
+Things get more interesting when we need to serialize persistent
+objects.  For persistent objects we must make sure that we respect
+object identity, for example.  And we must save some kind of
+representation of the object's class, so we can recreate it correctly.
+And we must save all slot values, so we need some simple MOP magic to
+find all slots.
+
+
+* OBJECT IDENTITY 
+
+Let's look at object identity first:
+
+Suppose we have a simple persistent family:
+
+CODE
+
+(let* ((jane (make-instance 'person :name "Jane"))
+       (dick (make-instance 'person :name "Dick" :child jane))
+       (mary (make-instance 'person :name "Mary" :child jane)))
+  (make-instance 'family
+                 ;; Try to be politically correct.
+                 :parent-1 dick
+                 :parent-2 mary))
+  
+END CODE
+
+Now JANE is a 'shared object': it is (or 'she is') referenced twice.
+But we don't want to save her *twice*.  When serializing either DICK
+or MARY, we just save a *reference* to JANE.
+
+When we *deserialize* DICK (or MARY) at a later point, we don't deserialize
+JANE either.  Instead we fill the CHILD slot of DICK with a *proxy*.  Only
+when the application tries to read DICK'S CHILD slot will the JANE object
+be loaded into memory by the deserializer.
+
+
+* SLOT-VALUE-USING-CLASS
+
+We use the MetaObject Protocol to detect whenever a persistent slot is
+being accessed.  Here's the method that makes sure that proxies are
+automatically dereferenced at the right moment:
+
+CODE
+(defmethod slot-value-using-class :around ((class persistent-class)
+                                           object
+                                           slot)
+  ;; Automatically dereference proxies.
+  (declare (ignore class slot))
+  (maybe-dereference-proxy (call-next-method)))
+END
+
+We have similar methods on (SETF SLOT-VALUE-USING-CLASS) to hook into
+slot *writes* and on INITIALIZE-INSTANCE to do the right thing when a
+new persistent object is created in memory.
+
+
+* PROXIES
+
+Here's the definition of a proxy in Rucksack:
+
+CODE
+
+(defclass proxy ()
+  ((object-id :initarg :object-id :reader object-id)
+   (rucksack :initform (current-rucksack)
+             :initarg :rucksack :reader rucksack))
+  (:documentation "Proxies are some kind of in-memory forwarding pointer
+to data in the cache.  They are never saved on disk."))
+
+END
+
+Instead of a class like this, we could also have used plain object ids
+(no-nonsense raw integers) to represent the objects.  This would be
+more efficient, but it has two problems:
+
+1. It would become quite difficult to work with more than one rucksack
+   at a time, because you'd need to keep track of which object id
+   belongs to which rucksack in your application code.
+
+2. You lose 'type information': you can't distinguish an object id
+   from a proxy, because they both look like integers from the
+   outside.  This means that the application programmer will have to
+   dereference proxies by hand instead of having it done automatically
+   by the compiler (unless you force a static distinction between
+   slots that always contain proxies and slots that contain other
+   value; but such a rigid distinction wouldn't really fit with Lisp's
+   dynamic programming style).
+
+
+
+* UPDATING PERSISTENT OBJECTS
+
+One question that I had to answer for Rucksack is: how are slot values
+of persistent objects updated on disk?  I've made a big choice that
+has a strong influence on rest of Rucksack: objects on disk are never
+overwritten (as long as they can be referenced).  Instead of
+serializing a new version of an object into the same disk space as an
+old version, the new version is serialized into some new, freshly
+allocated space on disk.
+
+I'll return to this decision later, when I talk about parallel
+transactions and recovering from crashes.
+
+
+
+* CHOICE: OBJECT TABLE, DIRECT POINTERS, BTREES?
+
+Another choice that a persistence library has to make is: given an
+object ID, how do I find the corresponding object?  How do I find the
+disk position of the object, so my deserializer can reconstruct it in
+memory when I need it?
+
+For Rucksack, I've considered three possibilities:
+
+1. Use the disk position itself as the object ID.  So an object ID would
+   be pretty much like a normal pointer in memory.
+
+2. Use an 'object vector': the vector is indexed by object identifiers, and
+   each vector element contains the disk position of the object.
+
+3. Use a more complicated indexing scheme (btrees, for example).
+
+In fact, I'm *still* considering these possibilities.  At the moment,
+Rucksack uses the second scheme.  Each rucksack directory has a file
+called 'heap', which contains serialized versions of all objects, and
+a file called 'objects', which contains a straightforward mapping from
+object IDs to object positions on disk.
+
+
+* CACHE
+
+So the object table and the serializer give us a way to reconstruct an
+object, given its ID.  But reconstructing an object from its ID is an
+expensive operation.  We may want to cache this.  Keeping a cache of
+recently reconstructed objects may speed up our programs a lot.
+
+
+* GETTING AN OBJECT FROM THE CACHE
+
+Here's a code fragment from an old version of Rucksack that shows the
+basic working of the cache:
+
+CODE FRAGMENT
+
+(defmethod cache-get-object (object-id (cache standard-cache))
+  (let ((result (or (gethash object-id (objects cache))
+                    (gethash object-id (dirty-objects cache))
+                    (let ((object (load-cached-object object-id cache)))
+                      ;; Add to in-memory cache.
+                      (when (cache-full-p cache)
+                        (make-room-in-cache cache))
+                      (setf (gethash object-id (objects cache)) object)
+                      object))))
+    ;; Put it (back) in front of the queue.
+    (add-to-queue object-id cache)
+    result))
+
+END
+
+So we keep a hashtable of objects that have been loaded from disk and
+a separate hashtable of objects that have been changed since they were
+loaded.  If we can't find an object in one of those hashtables we load
+it from disk.
+
+
+
+* LOWER-LEVEL CACHES
+
+I've never written a relational database or even looked at the code
+for one, but I've tried to read some of the database literature.  From
+that literature I get the impression that relational databases usually
+do their caching on a much lower level than what I just described.
+For example, here's a quote from "Database Systems: The Complete Book"
+by García-Molina, Ullman & Widom:
+
+  A DBMS will manage disk blocks itself, rather than relying on the
+  operating system's file manager to move blocks between main and
+  secondary memory.
+
+I haven't taken that route for Rucksack, and I've decided to ignore
+issues like the size of disk blocks entirely, mostly because:
+
+ - I hope that the operating system will take care of this
+ - I want to keep Rucksack as simple as possible
+ - I want Rucksack to be written in portable Common Lisp, which doesn't
+   know the concept of disk blocks.
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+4. GARBAGE COLLECTION
+
+* DELETE-INSTANCE: YES OR NO?
+
+One question that persistence libraries need to answer is:
+
+  Do we provide a way to delete a persistent object, so that it
+  won't be 'loadable' anymore and its disk space can be reused?
+
+This question is very similar to the old manual versus automatic
+memory management question.  Of course, Lispers already knew the
+answer to that question before I was born: manual memory management is
+a sin.  And it isn't even a pleasant one.
+
+Somehow the question looks different when we're dealing with
+persistence.  But as soon as you introduce a function that takes an
+object ID and removes the corresponding object from the persistent
+store in such a way that it can't be loaded again, you basically
+introduce 'dangling pointers' again.
+
+Welcome back to 'pointer hell'!
+
+So...  While I'm uncertain about many of the decisions I've made for
+Rucksack, I'm pretty sure about this one:
+
+  There will be no delete-instance.  Every object id that's visible to
+  the programmer will always refer to a valid persistent object, so
+  there will be no 'dangling pointers'.  When necessary, a garbage
+  collector will take care of reclaiming unused disk space.  To ensure
+  that an object will never be visible again, you can remove it from
+  all objects that contain a reference to it.  This is exactly how we
+  normally deal with non-persistent objects in Lisp.
+
+(I believe Martin Cracauer may tell us that garbage collection is a
+decadent luxury and that real programmers don't need it.  And he would
+probably be right too, *if* you *absolutely* need to squeeze maximum
+performance out of your system.  But Rucksack is designed with
+slightly more modest performance goals, and slightly less modest
+usability goals. )
+
+
+* THE GARBAGE COLLECTOR
+
+I don't have time to discuss all details of the memory manager and the
+garbage collector, so I'll briefly describe the basics.
+
+I've considered both copying and mark-and-sweep collectors.  One
+advantage of a copying collector is that it automatically defragments
+the heap, and that allocating space for a new object can be trivial:
+you just serialize it to the end of the heap file.
+
+The biggest problem I see with a copying collector is that it becomes
+inefficient if you have many big objects that don't contain references
+to other objects (for example the contents of binary files that we
+want to keep in the database): these objects will need to be copied
+during each collection.
+
+An application I wrote a while ago is a simple publication archive
+that fits this model: not much 'structured data' and fairly many
+binary files, with sizes ranging from a few hundred KB to about 100
+MB.  When I was writing my copying collector, I began to imagine my
+collector spending 99 % of its time just copying these files.  Now I'm
+usually not the kind of programmer who tries to squeeze the last bit
+of performance out of his programs, but this looked painful even to
+me.
+
+So I decided to try my luck with a mark and sweep collector.
+
+Basically it works like this:
+
+1. BEGIN
+   
+   At the beginning of a garbage collection cycle, all objects are
+   marked 'dead'.  If you use the object vector that I described
+   earlier, this is very easy to do.  Each element of the object
+   vector reserves a few bits for the garbage collector.  One of these
+   bits is the so called mark bit.  So we just loop across the vector,
+   clearing the mark bit.
+
+2. MARK
+
+   Now all live objects are traced, beginning with the so called root
+   set.  Each object that can be reached from the root set is marked
+   'alive' again.  All other objects will remain marked 'dead', which
+   is exactly what we need.
+
+3. SWEEP
+
+   Now the entire heap is 'sweeped', object after object, from left to
+   right.  The disk space for each object that is marked dead is
+   returned to a free list.
+
+
+* MAKING IT INCREMENTAL
+
+This works well and is not too difficult to implement.  But for big
+databases it can take a while (minutes, maybe even hours) to run.  If
+you're writing web servers or other programs that continually need to
+be able to handle user requests, this is unacceptable.
+
+So I made it incremental.
+
+To make a garbage collector incremental, you need to do two things:
+
+1. The first thing is that the collector must be able to do its work
+   in many small steps.  (The most obvious moment to run such a small
+   step is just after some disk space has been allocated for a new
+   object.)  Each small step must know where it should continue the
+   work of the previous small step.  In other words, all the state
+   that's normally kept in local variables on the stack must now be
+   registered in slots of the garbage collector object.
+
+CODE FRAGMENT
+(defclass mark-and-sweep-heap (garbage-collector free-list-heap serializer)
+  ((state :initform :ready
+          :type (member :starting
+                        :marking-object-table
+                        :scanning
+                        :sweeping-heap
+                        :sweeping-object-table
+                        :finishing
+                        :ready)
+          :accessor state)
+   ;; Some counters that keep track of the amount of work done by
+   ;; the garbage collector.
+   (nr-object-bytes-marked :initform 0 :accessor nr-object-bytes-marked)
+   (nr-heap-bytes-scanned :initform 0 :accessor nr-heap-bytes-scanned)
+   (nr-heap-bytes-sweeped :initform 0 :accessor nr-heap-bytes-sweeped)
+   (nr-object-bytes-sweeped :initform 0 :accessor nr-object-bytes-sweeped)))
+END CODE
+
+  As you can see in the code fragment, there isn't really that much
+  state to keep track of.
+
+2. The second thing is that the garbage collector needs to know how much
+   work it should do at each step.  An effective way is to divide the
+   size of the free heap space by the size of the heap that still needs
+   to be garbage collected and try to keep that number more or less
+   constant.
+
+   In formula form you get something like:
+
+CODE FRAGMENT
+       New / Free = DoNow / Do
+  so:  DoNow = (New / Free) * ToDo
+
+  New   : number of new bytes allocated at this step
+  Free  : number of free bytes in the heap
+  DoNow : number of bytes to collect at this step
+  Do    : number of bytes to collect during this
+          garbage collection
+END
+
+Fortunately, you don't need a degree in mathematics to understand this
+formula.
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+5. TRANSACTIONS
+
+* ATOMICITY, ISOLATION, DURABILITY
+
+Changes to data often need to occur in so called 'atomic' groups.
+This means that either *all* of the changes should be executed, or
+none of them should be executed.  Such an all-or-nothing group of
+changes is usually called a transaction.  When an error occurs in the
+middle of a transaction, all changes that were executed by the
+transaction must be undone: this is called a 'rollback'.  When the
+transaction has finished without any errors, all changes must be saved
+to disk: this is called a 'commit'.
+
+Apart from atomicity ('all-or-nothingness') and durability (saving all
+changes) another important requirement for transactions is that they
+may not interfere with each other.  As long as a transaction hasn't
+committed its changes, it must run as if it were the only transaction
+using the database.  In other words, it must appear to be 'isolated'
+from all other transactions.
+
+Bank accounts are a popular example when discussing transactions.
+Let's look at the following function to transfer money from one
+account to another.
+
+PICTURE
+
+(defun transfer-money (amount account-a account-b)
+  "Transfer AMOUNT from ACCOUNT-A to ACCOUNT-B."
+  (with-transaction ()
+    ;; Check that there's enough money in the account.
+    (unless (plusp (- (slot-value account-a 'balance) amount))
+      (error "Not enough money."))
+    ;; Subtract the amount from account A.
+    (decf (slot-value account-a 'balance) amount)
+    ;; Add the same amount to account B.
+    (incf (slot-value account-b 'balance) amount)))
+
+END
+
+Now suppose two transactions T1 and T2 are trying to transfer 100 EURO
+from an account that contains 150 EURO.  If the bank is not careful,
+we could get the following sequence of events:
+
+PICTURE
+
+1. T1: check that there's enough money -> OK
+2. T2: check that there's enough money -> OK
+3. T1: subtract 100 EURO from the account -> now it contains 50 EURO.
+4. T2: subtract 100 EURO from the account -> OOPS.
+
+END
+
+This is one kind of error that can happen when two transactions are
+not isolated from each other.
+
+
+* POSSIBLE SOLUTIONS
+
+To guarantee that transactions run in isolation, we could:
+
+ - Let the application programmer worry about it and write locking
+   code where necessary.
+
+   I haven't chosen this solution.  Keeping transactions isolated is
+   a difficult problem where it's easy to make mistakes that are hard
+   to detect.
+
+ - Use some kind of automatic locking.
+
+   The best known automatic locking strategy is called "two phase
+   locking".  This basically means that a transaction acquires a
+   lock for each object that it wants to change, and then doesn't
+   release the lock until the entire transaction has finished.
+
+   I haven't chosen this solution either.  One potential problem with
+   two phase locking is that long-running transactions (for example
+   a transaction that looks at all bank accounts to make a monthly
+   report) can easily lock up all other transactions.  Now there may
+   be solutions for this too, but I felt these were getting too
+   complicated.
+
+
+* RUCKSACK'S SOLUTION
+
+So what does Rucksack do?  It uses so called 'optimistic concurrency
+control' combined with 'multiple object versions'.
+
+'Optimistic concurrency control' means that Rucksack doesn't use locks
+to keep its transactions isolated from each other.  Instead it just
+rolls back a transaction when it is trying to change data that it
+shouldn't change, basically telling it to 'try again later'.
+
+Rolling back and retrying a transaction can be rather expensive;
+that's why this strategy is called 'optimistic': it assumes that this
+kind of transaction conflict happens rarely.
+
+Rucksack tries to make transaction conflicts more rare by using
+multiple object versions.  With multiple object versions, each
+transaction that modifies an object gets its own copy of that object.
+
+This means that an older transaction can stay in its own consistent
+little world and happily keep reading older versions of objects that
+are already being changed by younger transactions.  So one transaction
+can have its cake while another transaction is eating it ;-)
+
+That doesn't mean that both transactions can be eating the cake at the
+same time, of course.  In that case, Rucksack will abort the second
+transaction that tries to eat the cake and give it an opportunity to
+retry later.  If there's any cake left, of course.
+
+
+* SAFETY NET
+
+The fact that Rucksack uses optimistic concurrency control does not
+mean that you can't use manual or automatic locking on a higher level.
+It would be possible to use manual locking and treat Rucksack's
+transaction conflict detection mechanism as a sort of safety net, for
+example.
+
+
+
+* DETECTING CONFLICTS
+
+So how are transaction conflicts detected?
+
+Each transaction has a unique ID.  For each version of each object, we
+register the ID of the transaction that created/modified the object.
+The ID also functions as a relative timestamp: transaction A is older
+than transaction B if its ID is less than the ID of transaction B.
+
+Each object creation/modification always happens in the context of a
+transaction.  A transaction conflict occurs when an old transaction
+tries to modify an object that was modified by a younger transaction.
+
+(Actually, there only needs to be a serialization conflict when an old
+transaction tries to modify a slot that was modified by a younger
+transaction.  But Rucksack detects conflicts at the object level, not
+the slot level.)
+
+
+* TRANSACTIONS AND THE CACHE
+
+Before we had transactions, the cache was relatively simple: it kept a
+set of 'clean' objects: objects that had been read from disk but had
+not been changed and a set of 'dirty' objects: objects that had been
+modified and needed to be written back to disk.
+
+With multiversion transactions, this design needs to change.  
+
+Here's a simplified version of Rucksack's class definition for CACHE:
+
+PICTURE
+
+(defclass standard-cache (cache)
+  ((heap :initarg :heap :reader heap)
+   (schema-table :initarg :schema-table :reader schema-table)
+   (commit-file :reader commit-file)
+   ;; Clean objects
+   (objects :initarg :objects :reader objects)
+   (highest-transaction-id :initarg :highest-transaction-id
+                           :initform 0
+                           :accessor highest-transaction-id)
+   (transactions :initform (make-hash-table)
+                 :reader transactions
+                 :documentation "A mapping from transaction ids to
+transactions.  Contains only open transactions, i.e. transactions that
+haven't been rolled back or committed.")))
+
+END
+
+And here's the definition of TRANSACTION:
+
+PICTURE
+
+(defclass standard-transaction (transaction)
+  ((id :initarg :id :reader transaction-id)
+   (dirty-objects :initform (make-hash-table)
+                  :reader dirty-objects
+                  :documentation "A hash-table (from id to object)
+containing all objects of which the slot changes have not been written
+to file yet.")))
+
+END
+
+
+* GETTING OBJECTS FROM THE CACHE 
+
+So what happens when an object must be retrieved from the cache?
+
+With multiple object versions, a transaction is only allowed to see
+the version that it has modified itself.  Or, if it hasn't modified
+the object, the version that was modified by the youngest transaction
+that's older than itself.
+
+For example: if the current transaction is #3, and the object has been
+modified by transactions #1 and #5.  Then the 'compatible' object
+version is the one that was modified by #1.
+
+CODE FRAGMENT
+
+(defmethod cache-get-object (object-id (cache standard-cache))
+  (let ((transaction (current-transaction)))
+    (or ;; Unmodified, already loaded and compatible with the
+        ;; current transaction?  Fine, let's use it.
+        (let ((object (gethash object-id (objects cache))))
+          (and object
+               (<= (transaction-id object) (transaction-id transaction))
+               object))
+        ;; Modified by an open transaction?  Try to find the
+        ;; 'compatible' version.
+        (find-object-version object-id transaction cache)
+        ;; Not in memory at all? Then load the compatible version
+        ;; from disk.
+        (multiple-value-bind (object most-recent-p)
+            (load-object object-id transaction cache)
+          (when most-recent-p
+            ;; Add to in-memory cache if the loaded object is
+            ;; the most recent version of the object.
+            (when (cache-full-p cache)
+              (make-room-in-cache cache))
+            (setf (gethash object-id (objects cache)) object))
+          object))))
+
+END
+
+
+* ROLLING BACK A TRANSACTION
+
+When a transaction is rolled back, all side effects of the transaction
+must be undone.  There must be no noticeable difference between an
+rolled back transaction and a transaction that hasn't even started
+yet.
+
+Rolling back is only possible for a transaction that hasn't been
+committed yet (and is not currently being committed).  This makes
+rolling back easy: the transaction can basically just clear its dirty
+objects table to ensure that no changes to those objects will be
+written to disk.
+
+So here's some more code:
+
+PICTURE
+
+(defmethod transaction-rollback-1 ((transaction standard-transaction)
+                                   (cache standard-cache)
+                                   (rucksack standard-rucksack))
+  (clrhash (dirty-objects transaction))
+  (queue-clear (dirty-queue transaction))
+  (close-transaction cache transaction))
+
+END
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+6. CRASHES AND TRANSACTION RECOVERY
+
+* RECOVERY
+
+The main problem for recovery is that a transaction commit may fail
+halfway.  This would result in an inconsistent state.  To preserve
+consistency, we need to undo the effects of the partially committed
+transaction.
+
+As usual, there are different ways of doing this.  And, as usual, I've
+tried to find a strategy that's relatively simple to implement,
+integrates well with the rest of Rucksack and is a bit different from
+the most popular way of doing this.
+
+Rucksack's recovery strategy is based upon two ideas:
+
+1. The most important idea is that we can use the fact that Rucksack
+   never actually overwrites objects but always creates new versions.
+
+2. The second idea is that Rucksack saves a summary of what a
+   transaction commit is going to do to a separate file, a so called
+   'commit file'.  After saving the summary of what it's going to do,
+   it actually *does* it and then deletes the summary again.  If a
+   transaction-commit fails halfway, the recovery procedure can undo
+   the partial effects of the failed transaction by use the
+   information in the commit file.
+
+
+* COMMIT FILE
+
+The following code shows how commit files are created.
+
+CODE
+
+(defun create-commit-file (transaction cache)
+  "Write object ids of all dirty objects to the commit file, so
+recovery can do its job if this transaction never completes."
+  (with-open-file (stream (commit-filename cache)
+                          :direction :output
+                          :if-exists :supersede
+                          :if-does-not-exist :create)
+    (serialize (transaction-id transaction) stream)
+    (serialize (hash-table-count (dirty-objects transaction)) stream)
+    (loop for object-id being the hash-key of (dirty-objects transaction)
+          do (serialize object-id stream))))
+
+END
+
+So the commit file contains the transaction id of the transaction
+that's going to be committed *and* it contains the object ids of all
+*objects* that are going to be committed.
+
+Once the commit file is created successfully, the actual transaction
+commit will save all dirty objects to disk and then remove the commit
+file.
+
+
+* RECOVERING
+
+Whenever Rucksack is started, it checks to see if there's a commit
+file left.  If there is, it knows that is being started after a crash.
+It will then investigate all object ids that were saved in the commit
+file.  For each object that contains a version created by the
+unfinished transaction, it will remove that version from the object
+version list.
+
+After that, it can resume normal operation.
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+7. INDEXING OBJECTS: BTREES, SLOT/CLASS INDEXES, MOP MAGIC
+
+* INTRO
+
+So... We know how to save persistent objects and load them back, we
+can cache the load operation for better performance, we can reclaim
+unused disk space when necessary, we can use transactions to keep
+changes isolated from changes in other processes, and we even stand a
+fair chance of recovering from failure.
+
+What more could we need?  Ah yes...  Sometimes we want to find some
+objects we're interested in without traversing the whole database.  In
+other words, we need a persistent indexing mechanism.
+
+Unlike many other database or persistence libraries, Rucksack builds
+indexes on top of persistent objects, not the other way round.  Maybe
+this costs us a bit in performance because we can't use any low level
+tricks for the indexing.  But in return for that we get a flexible and
+easily extendible indexing mechanism.
+
+Here's how it works:
+
+
+* MORE MOP MAGIC
+
+We already needed some MOP magic to hook into SLOT-VALUE-USING-CLASS
+and INITIALIZE-INSTANCE for persistent objects.  Now we need some more
+magic to add our own slot and class options for specifying indexes.
+
+This means we can specify something like the following:
+
+PICTURE
+
+(defclass person ()
+  ((name :index (btree :key< string< :key= string=))
+   (year-of-birth :index (btree :key< < :key= =))
+   (age :persistence nil))
+  (:indexed t)
+  (:metaclass persistent-class))
+
+END PICTURE
+
+You see an :INDEX slot option being used for the NAME and
+YEAR-OF-BIRTH slots, a :PERSISTENCE slot option for the AGE slot and
+an :INDEX class option for the whole PERSON class.
+
+Let's look at the class option first: by specifying :INDEXED T, we
+specify that the object IDs of all instances of this class (or one of
+its subclasses) will be added to an index.  Then the generic function
+RUCKSACK-MAP-INSTANCES can be used to iterate over all instances of
+this class (or one of its subclasses, unless those subclasses have an
+:INDEXED NIL class option).
+
+For slot options the situation is similar, except that you can use so
+called index specs to specify explicitly what kind of indexing should
+be used.  An index spec has a simple structure: it is either a symbol
+or a list.  If it's a symbol, it's the name of an index class.  If
+it's a list, the car of the list is the name of an index class, and
+the cdr contains a plist of initargs for the index.
+
+The index class can be an arbitrary class (including classes that you
+define yourself) as long as it's persistent and follows a simple
+indexing protocol.  At the moment, Rucksack has only one index class:
+a no-nonsense, catch-as-catch-can implementation of btrees, written on
+top of persistent conses and persistent vectors.
+
+
+* INDEXES AND GARBAGE COLLECTION
+
+All class and slot indexes are automatically added to Rucksack's set
+of root objects, so indexed objects won't be removed by the garbage
+collector. All non-indexed objects are NOT part of the root set, so
+they will be garbage collected if they're unreachable from one of the
+indexes.
+
+
+* QUERIES (if time left)
+
+I think it should be relatively easy to build a simple query language
+on top of RUCKSACK-MAP-INSTANCES and RUCKSACK-MAP-SLOT-VALUES.  This
+should make it possible to generate relatively efficient code for
+queries like:
+
+PICTURE
+
+(select 'event
+        (lambda (event) ...)
+        :where '(and (string= name "ECLM")
+                     (= year 2006))
+        :order-by 'name)
+
+END
+
+I think there's quite a bit of literature on query optimization and
+Lisp's fantastic code transformation and run-time compilation features
+may add some interesting new possibilites to the standard repertoire.
+But that's still open territory.  At least for me ;-)
+
+
+* MULTI-DIMENSIONAL INDEXES (if time left)
+
+Another interesting Rucksack extension that I haven't written yet
+would be to define multi-dimensional indexes (i.e. indexes that look
+at the value of more than one slot).
+
+For example:
+
+PICTURE
+
+(defclass point ()
+  ((x :type number)
+   (y :type number))
+  (;; Don't use standard indexing (by object id), because we're not
+   ;; interested in EQL-ness for points.
+   :indexed nil 
+   ;; Index points by their coordinates instead.
+   :index ((x y) (2d-index :key< (< <) :key= (= =))))
+  (:metaclass persistent-class))
+
+END
+
+I'm just making something up here.  Maybe another syntax would be
+needed for multi-dimensional indexing.  My main point here is that it
+is relatively easy to create such extensions yourself and integrate
+them with the rest of Rucksack without having to resort to low-level
+hacks.
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+8. SCHEMAS
+
+* INTRO
+
+Suppose we have some persistent objects that were created with the
+following class definition:
+
+PICTURE
+
+(defclass person ()
+  ((name :initarg :name)
+   (age :initarg :age))
+  (:metaclass persistent-class))
+
+END
+
+Now we decide to change the class definition of PERSON to:
+
+PICTURE
+
+(defclass person ()
+  ((name :initarg :name)
+   (birth-date :initarg :birth-date))
+   (:metaclass persistent-class))
+
+END
+
+
+* THE PROBLEM
+
+What should happen when we try to load one of the old person
+instances?
+
+We can't rely on UPDATE-INSTANCE-FOR-REDEFINED-CLASS, because as far
+as our Lisp implementation is concerned, the disk version of our
+persistent PERSON isn't an instance of any class at all: it's just
+some bytes in a file.
+
+And when we load the object from disk, we can't ALLOCATE an INSTANCE
+of the obsolete PERSON class, because we have no portable way of finding
+that obsolete class.
+
+* VERSIONS OF CLASS DEFINITIONS
+
+Rucksack's solution is to keep track of the schema of each persistent
+object.  Each schema corresponds to *a version of* a class definition.
+
+The most important elements of a schema are:
+
+PICTURE
+
+ - schema ID
+ - class name
+ - list of effective persistent slots
+ - version number
+
+END
+
+All schemas are kept in a schema table.  They're indexed both by
+ID and by class name.
+
+Whenever Rucksack saves a persistent object, it saves the schema
+id that corresponds to the object's class.
+
+When a persistent object must be loaded from disk, Rucksack loads the
+schema nr and finds the corresponding schema.  If the schema has an
+old version number, Rucksack calls a generic function after calling
+ALLOCATE-INSTANCE for the current class version.  The generic function
+is very similar to UPDATE-INSTANCE-FOR-REDEFINED-CLASS: it takes a
+list of added slots, a list of deleted slots and a property list
+containing the slot names and values for slots that were discarded and
+had values.
+
+The default method for this function ignores the deleted slots,
+initializes added slots according to their initargs or initforms and
+initializes shared slots (that did not change) with the values that
+were saved on disk.
+
+
+* CREATING NEW SCHEMAS
+
+When a class definition changes (e.g. because of DEFCLASS), this must
+be detected by Rucksack. (This can be done with the MOP by hooking
+into (RE)INITIALIZE-INSTANCE for persistent classes.  We're doing that
+anyway for keeping the class and slot indexes up to date.)
+
+Rucksack analyzes the new class definition; if it's different from the
+previous version, a new schema is added to the database.  From that
+moment, when an instance of the redefined class is created it will be
+saved with the new schema number.
+

@@ -1,0 +1,62 @@
+RUCKSACK INTERNALS
+
+
+* Free list heaps
+
+A free-list-heap starts with an 8-byte address ('disk pointer') that
+points to the end of the heap.  This is followed by as many
+'disk-pointers' as the heap has free lists: each disk pointer points
+to the first free block on that free list.
+
+* Object table
+
+The object table is a free-list-heap with exactly one free list, so it
+contains one free list pointer.
+
+
+* The real heap
+
+The 'real' heap contains 32 free lists, with a smallest block size of
+16 (i.e. 2^4) and a largest block size of 2^(4+31), i.e.  32 GB.
+
+
+* Blocks and objects
+ 
+The heap contains blocks of different sizes (currently the block sizes
+are powers of 2; starting with blocks of 16 bytes).  Each block starts
+with an 8-byte header.  If the block is unoccupied, the header
+contains a pointer to the next block in the free list; otherwise it
+contains the size of the block.
+ 
+The header is followed by a serialized value which is either NIL, a
+positive integer or a negative integer.  If it's NIL, the block is
+occupied by an object of which there is exactly one version.  If it's
+a positive integer, the block is occupied by an object and the integer
+is a pointer to (the heap position of) the previously saved version of
+the object.  If it's negative, the block belongs to a free list and is
+not in use; the integer's absolute value is the size of the block (the
+sweep phase of the garbage collector needs this block size).
+ 
+[OCCUPIED BLOCK]:
+  0- 8: block size
+  8-15: pointer to previous version (nil or an integer)
+   .. : transaction id
+   .. : object id
+   .. : nr of slots
+   .. : schema id
+   ...: serialized slots
+   ...: maybe some free space
+ 
+[FREE BLOCK]:
+  0- 8: pointer to next free block
+  ..  : the negative of the block size
+  ... : free space
+
+[ALLOCATED BUT NOT YET OCCUPIED BLOCK]
+  0- 8: block size
+   .. : ???
+
+  
+
+
+

@@ -1,0 +1,260 @@
+* 2009-05-27 - version 0.1.20
+
+Fix a bug in the creation of transaction-ids (bug reported by Klaus
+Harbo).
+
+
+* 2008-03-31 - version 0.1.19
+
+Don't use wildcards but delete only the four rucksack files when
+opening an existing Rucksack in :SUPERSEDE mode (bug reported
+by Volkan YAZICI).
+
+
+* 2008-03-02 - version 0.1.18
+
+Fix a bug in RUCKSACK-DO-SLOT: it didn't work correctly when
+the EQUAL argument wasn't supplied.
+
+
+* 2008-02-11 - version 0.1.16
+
+Created new doc directory and added tutorial by Brad Beveridge.
+
+Added P-PUSH and P-POP.
+
+Improved btree efficiency by switching to a different data structure
+for the bindings.  Instead of using a persistent cons for each key/
+value pair, we now put the keys and values directly into the bnode
+vector.  This speeds up most btree operations because it reduces
+persistent consing when adding new values and it reduces indirections
+when searching for keys.
+
+Renamed BTREE-NODE to BNODE, BTREE-NODE-INDEX to BNODE-BINDINGS,
+BTREE-NODE-INDEX-COUNT to BNODE-NR-BINDINGS, FIND-BINDING-IN-NODE to
+FIND-KEY-IN-NODE.
+
+Fix a missing argument bug in REMOVE-CLASS-INDEX.
+
+Added a LAZY-CACHE which just clears the entire hash table whenever
+the cache gets full.  This improves memory usage, because the normal
+cache queue kept track of a lot of objects that for some reason
+couldn't be cleaned up by the implementation's garbage collector.
+
+Added the convenience macros RUCKSACK-DO-CLASS and RUCKSACK-DO-SLOT.
+
+Made RUCKSACK-DELETE-OBJECT an exported symbol of the RUCKSACK
+package.
+
+Fix a bug in TEST-NON-UNIQUE-BTREE: it should call
+CHECK-NON-UNIQUE-CONTENTS instead of CHECK-CONTENTS.
+
+
+* 2008-02-02 - version 0.1.15
+
+Fixed a garbage collector bug reported by Sean Ross. When the garbage
+collector deletes object ids from the object table (because the
+objects are dead and we may want to reuse their ids later for other
+objects), it should also remove that object from the cache.  If it
+doesn't, there's a possibility that the object id will be reused later
+for a new object and the cache wil still refer to the old in-memory
+object.
+
+
+* 2008-01-31 - version 0.1.14
+
+Class and slot indexes now map directly to objects instead of
+object-ids.  This fixes a bug where the garbage collector forgot to
+add all indexed objects to the root set. (Suggested by Sean Ross.)
+
+Increase default cache size to 100,000 objects.
+
+
+
+* 2008-01-23 - version 0.1.13
+
+Add Brad Beveridge's basic unit test suite (modified to work with
+lisp-unit instead of 5am).
+
+Add Chris Riesbeck's lisp-unit library to help with creating
+unit test suites.
+
+Move all tests to their own directory.
+
+Add P-NREVERSE and P-POSITION for persistent lists.
+
+Fix bugs in P-REPLACE and P-MAPCAR.
+
+
+* 2008-01-22 - version 0.1.12
+
+Use (ARRAY-DIMENSION buffer 0) instead of LENGTH in LOAD-BUFFER,
+because we want to ignore the fill pointer here.  Thanks to Sean Ross.
+
+
+* 2008-01-22 - version 0.1.11
+
+Fix bug caused by LEAF-DELETE-KEY.  Reported and fixed by Brad
+Beveridge.
+
+Fix some typos (:VALUE should be :VALUE=) in index.lisp.
+
+
+* 2008-01-16 - version 0.1.10
+
+When deleting a key from a btree, use the BTREE-KEY= function (not
+P-EQL) to determine the position of the key.  Reported and fixed
+by Leonid Novikov.
+
+
+* 2007-08-12 - version 0.1.9
+
+Fix btree bug during btree-delete: if we're deleting the biggest key
+from a leaf, we should update the parents so they'll use the key that
+has now become the biggest.  (Henrik Hjelte.)
+
+Try to signal an error when an incompatible value is given to indexed
+slots, e.g. trying to put a string into a slot with a :symbol-index.
+(Takehiko Abe)
+
+Signal an error during when putting duplicate values into a slot for
+which duplicate values are not allowed.  (Takehiko Abe)
+
+Use BTREE-VALUE-TYPE, not BTREE-KEY-TYPE, when type checking a value
+during BTREE-INSERT.  (Takehiko Abe)
+
+Wrap COMPILE-FILE calls in a WITH-COMPILATION-UNIT to prevent
+superfluous warnings about undefined functions.
+
+
+* 2007-03-13 - version 0.1.8
+
+Fix a bug in LEAF-DELETE-KEY (thanks to Henrik Hjelte).
+
+Add RUCKSACK-DELETE-OBJECT, RUCKSACK-DELETE-OBJECTS and
+RUCKSACK-ROOT-P (suggested by Henrik Hjelte).  I haven't tested these
+functions yet.
+
+
+* 2007-01-22 - version 0.1.7
+
+Get rid of two SBCL compiler warnings. (Reported by Cyrus Harmon.)
+
+
+* 2007-01-21 - version 0.1.6
+
+Added serializing/deserializing of structures.  Only works on SBCL.
+(Thanks to Levente Mészáros.)
+
+
+* 2006-11-30
+
+- FLET MAP-INDEXES should be LABELS MAP-INDEXES (thanks to Cyrus Harmon).
+
+- The :EQUAL parameter for MAP-INDEX-DATA wasn't handled correctly
+  for indexes with non-unique keys (reported by Cyrus Harmon).
+
+
+* 2006-09-04
+
+- Take care of some differences between the MOP implementations of Lispworks
+  and SBCL.  Lispworks doesn't call (setf slot-value-using-class) in
+  SHARED-INITIALIZE, but SBCL does.  Lispworks calls FINALIZE-INHERITANCE
+  after a class is redefined and a new instance is created, but SBCL
+  doesn't.  All tests now work for Lispworks (5.0) and SBCL (0.9.16).
+
+- Some work on a copying GC.
+
+* 2006-09-03
+
+- Handle updates of in-memory persistent objects by writing a method
+  for Lisp's UPDATE-INSTANCE-FOR-REDEFINED-CLASS that marks the object
+  as dirty and calls Rucksack's
+  UPDATE-PERSISTENT-INSTANCE-FOR-REDEFINED-CLASS.
+
+
+* 2006-09-01
+
+- Get rid of the Lispworks-specific PROCESS-A-SLOT-OPTION stuff and handle
+  the slot options in a way that's compatible with AMOP.
+
+- Removed INITARGS argument for UPDATE-PERSISTENT-INSTANCE-FOR-REDEFINED-CLASS,
+  because it turns out not to be necessary (see details in notes.txt).
+
+- Add explanation to test-index-1a.lisp about the use of
+    (eval-when (:compile-toplevel :load-toplevel :execute) ...)
+
+- Replace *RUCKSACK* by RS in test-*.lisp.
+
+
+* 2006-08-31
+
+- Write test cases for schema updates and user defined methods for
+  UPDATE-PERSISTENT-INSTANCE-FOR-REDEFINED-CLASS.
+
+- Indexing: compare the specified slot/class indexes to the indexes that
+  exist in the Rucksack, *not* to the indexes specified in the previous
+  version of the class definition.  Otherwise we get inconsistencies
+  when we recompile class definitions from scratch with a Rucksack that
+  already exists.
+
+- Write test case for slots with redefined indexes.  This also tests
+  the default method for UPDATE-PERSISTENT-INSTANCE-FOR-REDEFINED-CLASS.
+
+* 2006-08-30
+
+- FINALIZE-INHERITANCE: Compute slot diffs for obsolete schemas.
+
+- More work on UPDATE-PERSISTENT-INSTANCE-FOR-REDEFINED-CLASS.
+
+* 2006-08-29
+
+- Partial implementation of UPDATE-PERSISTENT-INSTANCE-FOR-REDEFINED-CLASS
+  & friends.
+
+* 2006-08-29
+
+- Example-1: indexing should still work after recompiling.
+
+- RUCKSACK-UPDATE-SLOT-INDEXES: Remove indexes for old slots that
+  don't exist anymore.
+
+- Some work on schema updates.
+
+- Compute persistent slots at the right moment.
+
+
+* 2006-08-26
+
+- Make sure that indexing works correctly with subclasses.
+- Fix some more indexing bugs.
+
+
+* 2006-08
+
+- The class and slot indexes were normal hash tables, but they should be
+  persistent objects like everything else: I replaced them by btrees.
+
+- Get process-lock and process-unlock working on SBCL (thanks to Geoff Cant).
+
+
+* 2006-08
+
+- Save and load the index tables when closing/opening a rucksack.
+
+- Implement the :UNIQUE slot option.
+
+- Improve predefined slot index specs.
+
+
+* 2006-08
+
+- Add a SERIAL-TRANSACTION-RUCKSACK class that allows for only one transaction
+  at a time (by using a transaction lock).  This allows for a fast track
+  towards a working Rucksack implementation.  Then parallel transactions
+  can be added later.
+
+- Don't do any GC at all while a transaction is writing objects to disk.
+  Instead we keep track of the amount of disk space allocated by the committing
+  transaction.  Then we do a (partial) GC immediately after committing the
+  transaction.
