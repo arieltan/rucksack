@@ -1,5 +1,8 @@
+# Rucksack: a flexible, light weight, open source persistence library
 
-* Getting started
+This is based on Arthur Lemmens's [Rucksack](http://common-lisp.net/project/rucksack/) with some enhancements.
+
+## Getting started
 
 To compile and load Rucksack and make sure that the basics are working:
 
@@ -15,8 +18,7 @@ To compile and load Rucksack and make sure that the basics are working:
 
 6. (run-tests)
 
-
-* The tutorial
+## Tutorial
 
 The tutorial by Brad Beveridge (in doc/rucksack-tutorial.lisp) is a
 good next step.
